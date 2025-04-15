@@ -27,10 +27,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
 # 加载模型和分词器
-model_path = "/root/.cache/modelscope/hub/models/Qwen/Qwen2.5-Coder-7B"
+model_path = "/root/.cache/modelscope/hub/models/AI-ModelScope/CodeLlama-7b-hf"
 print(f"正在加载模型: {model_path}")
 model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 model.eval()
 
 print(f"模型类型: {type(model).__name__}")
@@ -63,13 +63,13 @@ for name, module in model.named_modules():
     if "down_proj" in name or "o_proj" in name:
         print(f"找到相关模块: {name}")
     
-    # Qwen2.5-Coder的MLP层
+    # CodeLlama的MLP层
     if "mlp.down_proj" in name:
         layer_num = name.split(".")[2]  # 从名称中提取层号
         print(f"为MLP层 {layer_num} 注册钩子: {name}")
         fully_connected_forward_handles[name] = module.register_forward_hook(get_fully_connected_features)
     
-    # Qwen2.5-Coder的注意力层
+    # CodeLlama的注意力层
     if "self_attn.o_proj" in name:
         layer_num = name.split(".")[2]  # 从名称中提取层号
         print(f"为注意力层 {layer_num} 注册钩子: {name}")
@@ -160,7 +160,7 @@ def main():
     
     # 保存结果
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f'results/qwen_coder_results_{timestamp}.pickle'
+    save_path = f'results/codellama_code_results_{timestamp}.pickle'
     os.makedirs('results', exist_ok=True)
     
     with open(save_path, 'wb') as f:
@@ -168,4 +168,4 @@ def main():
     print(f"结果已保存到: {save_path}")
 
 if __name__ == "__main__":
-    main()
+    main() 
