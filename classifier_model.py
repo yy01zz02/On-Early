@@ -46,8 +46,13 @@ class RNNHallucinationClassifier(torch.nn.Module):
         self.linear = torch.nn.Linear(hidden_dim, 2)
     
     def forward(self, seq):
-        gru_out, _ = self.gru(seq)  # 修正了原代码中的self.lstm错误为self.gru
-        return self.linear(gru_out[:, -1, :])  # 修正了原代码中的索引错误
+        if len(seq.shape) == 3:  # 如果输入是[batch_size, seq_len, input_size]
+            gru_out, _ = self.gru(seq)
+            return self.linear(gru_out[:, -1, :])
+        else:  # 如果输入是[seq_len, input_size]
+            seq = seq.unsqueeze(0)  # 添加batch维度
+            gru_out, _ = self.gru(seq)
+            return self.linear(gru_out[:, -1, :]).squeeze(0)  # 移除batch维度
 
 # 生成分类器的ROC
 def gen_classifier_roc(inputs, labels):
@@ -96,6 +101,7 @@ def main():
                 
                 # 处理属性归因
                 if 'attributes_last_token' in results:
+                    print(f"处理RNN归因分类器...")
                     X_train, X_test, y_train, y_test = train_test_split(
                         results['attributes_last_token'], 
                         labels.astype(int), 
@@ -103,57 +109,104 @@ def main():
                         random_state=1234
                     )
                     
-                    rnn_model = RNNHallucinationClassifier()
+                    rnn_model = RNNHallucinationClassifier().to(device)
                     optimizer = torch.optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+                    
+                    # 打印一些调试信息
+                    print(f"训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
                     
                     for step in range(1001):
                         # 确保有足够的样本进行采样
                         sample_size = min(batch_size, len(X_train))
-                        x_sub, y_sub = zip(*random.sample(list(zip(X_train, y_train)), sample_size))
-                        y_sub = torch.tensor(y_sub).to(torch.long)
+                        indices = random.sample(range(len(X_train)), sample_size)
+                        
+                        # 批量处理以提高效率
+                        batch_x = [X_train[i] for i in indices]
+                        batch_y = [y_train[i] for i in indices]
+                        
+                        # 转换为张量并移动到设备
+                        y_sub = torch.tensor(batch_y).to(torch.long).to(device)
+                        
+                        # 单独处理每个属性序列并收集预测
                         optimizer.zero_grad()
-                        preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in x_sub])
+                        batch_preds = []
+                        for i, x in enumerate(batch_x):
+                            x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
+                            pred = rnn_model(x_tensor)
+                            batch_preds.append(pred)
+                        
+                        preds = torch.stack(batch_preds)
+                        
+                        if step == 0:
+                            print(f"预测形状: {preds.shape}, 标签形状: {y_sub.shape}")
+                        
                         loss = torch.nn.functional.cross_entropy(preds, y_sub)
                         loss.backward()
                         optimizer.step()
+                        
+                        if step % 100 == 0:
+                            print(f"步骤 {step}, 损失: {loss.item():.4f}")
                     
-                    preds = torch.stack([rnn_model(torch.tensor(i).view(1, -1, 1).to(torch.float)) for i in X_test])
+                    # 收集测试集预测
+                    print(f"评估测试集...")
+                    test_preds = []
+                    with torch.no_grad():
+                        for x in X_test:
+                            x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
+                            pred = rnn_model(x_tensor)
+                            test_preds.append(pred)
+                    
+                    preds = torch.stack(test_preds)
                     preds = torch.nn.functional.softmax(preds, dim=1)
                     prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
                     
-                    classifier_results['last_token_attribution_rnn_roc'] = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
-                    classifier_results['last_token_attribution_rnn_acc'] = (prediction_classes.numpy()==y_test).mean()
+                    # 计算指标
+                    roc = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
+                    acc = (prediction_classes.numpy()==y_test).mean()
+                    
+                    print(f"RNN归因 ROC: {roc:.4f}, 准确率: {acc:.4f}")
+                    
+                    classifier_results['last_token_attribution_rnn_roc'] = roc
+                    classifier_results['last_token_attribution_rnn_acc'] = acc
                 
                 # 处理logits
                 if 'logits' in results and 'last_token_pos' in results:
+                    print(f"处理logits分类器...")
                     last_token_logits = np.stack([
                         sp.special.softmax(i[j]) for i, j in zip(results['logits'], results['last_token_pos'])
                     ])
                     last_token_logits_roc, last_token_logits_acc = gen_classifier_roc(last_token_logits, labels)
                     classifier_results['last_token_logits_roc'] = last_token_logits_roc
                     classifier_results['last_token_logits_acc'] = last_token_logits_acc
+                    print(f"Logits ROC: {last_token_logits_roc:.4f}, 准确率: {last_token_logits_acc:.4f}")
                 
                 # 处理全连接层
                 if 'last_token_fully_connected' in results:
+                    print(f"处理全连接层分类器...")
                     for layer in range(results['last_token_fully_connected'][0].shape[0]):
                         layer_data = np.stack([i[layer] for i in results['last_token_fully_connected']])
                         layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
                         classifier_results[f'last_token_fully_connected_roc_{layer}'] = layer_roc
                         classifier_results[f'last_token_fully_connected_acc_{layer}'] = layer_acc
+                        print(f"全连接层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
                 
                 # 处理注意力层
                 if 'last_token_attention' in results:
+                    print(f"处理注意力层分类器...")
                     for layer in range(results['last_token_attention'][0].shape[0]):
                         layer_data = np.stack([i[layer] for i in results['last_token_attention']])
                         layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
                         classifier_results[f'last_token_attention_roc_{layer}'] = layer_roc
                         classifier_results[f'last_token_attention_acc_{layer}'] = layer_acc
+                        print(f"注意力层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
                 
                 all_results[str(results_file)] = classifier_results.copy()
                 print(f"处理文件 {results_file} 完成")
                 
             except Exception as err:
+                import traceback
                 print(f"处理文件 {results_file} 时出错: {err}")
+                print(traceback.format_exc())  # 打印完整的堆栈跟踪
     
     # 保存结果
     with open('./results/classifier_results.pickle', 'wb') as f:
