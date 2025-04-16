@@ -1,13 +1,11 @@
-import pickle
+ import pickle
 from pathlib import Path
 import numpy as np
 import scipy as sp
-
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 import random
-
 from tqdm import tqdm
 
 # 硬件设置
@@ -80,7 +78,7 @@ def gen_classifier_roc(inputs, labels):
         return roc_auc_score(y_test.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==y_test.cpu().numpy()).mean()
 
 def main():
-    results_pattern = "qwen_coder_results_*.pickle"
+    results_pattern = "codellama_code_results_*.pickle"
     inference_results = list(Path("./results/").rglob(results_pattern))
     print(f"查找结果文件 {results_pattern}，找到: {inference_results}")
     
@@ -261,7 +259,7 @@ def main():
                 print(traceback.format_exc())  # 打印完整的堆栈跟踪
     
     # 保存结果
-    with open('./results/qwen_classifier_results.pickle', 'wb') as f:
+    with open('./results/codellama_classifier_results.pickle', 'wb') as f:
         pickle.dump(all_results, f)
     
     # 打印结果摘要
@@ -272,4 +270,4 @@ def main():
             print(f"  {metric}: {value:.4f}")
 
 if __name__ == "__main__":
-    main() 
+    main()
