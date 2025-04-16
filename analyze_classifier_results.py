@@ -82,20 +82,16 @@ def extract_features_and_metrics(results):
         
         # 按特征类型分组
         feature_groups = {
-            "IG特征": {}, 
             "Softmax概率": {},
             "全连接层": {},
             "注意力层": {},
+            "IG归因": {},
             "其他特征": {}
         }
         
         # 提取所有指标
         for metric_name, value in metrics.items():
-            if "attributes_last_token" in metric_name:
-                feature_type = "IG特征"
-                layer = "N/A"
-                metric_type = "ROC AUC" if "roc" in metric_name else "准确率"
-            elif "softmax" in metric_name:
+            if "softmax" in metric_name:
                 feature_type = "Softmax概率"
                 layer = "N/A"
                 metric_type = "ROC AUC" if "roc" in metric_name else "准确率"
@@ -121,6 +117,10 @@ def extract_features_and_metrics(results):
                 else:
                     layer = "N/A"
                     metric_type = "ROC AUC" if "roc" in metric_name else "准确率"
+            elif "attribution" in metric_name:
+                feature_type = "IG归因"
+                layer = "N/A"
+                metric_type = "ROC AUC" if "roc" in metric_name else "准确率"
             else:
                 feature_type = "其他特征"
                 layer = "N/A"
@@ -292,7 +292,7 @@ def run_analysis(result_files, output_dir="./analysis_results"):
     plot_model_comparison(df, output_dir)
     
     # 为不同特征类型绘制层性能图
-    for feature_type in ["全连接层", "注意力层"]:
+    for feature_type in ["全连接层", "注意力层", "IG归因", "Softmax概率"]:
         plot_layer_performance(df, feature_type, output_dir)
     
     print(f"分析完成，结果保存到 {output_dir} 目录")

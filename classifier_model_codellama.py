@@ -99,9 +99,9 @@ def main():
                         'code': [],
                         'label': [],
                         'last_token_pos': [],
-                        'last_token_softmax': [],
                         'last_token_fully_connected': [],
                         'last_token_attention': [],
+                        'last_token_softmax': [],
                         'attributes_last_token': []
                     }
                     
@@ -120,25 +120,23 @@ def main():
                 print(f"数据样本数: {len(results['label'])}")
                 labels = np.array(results['label'])
                 
-                # 处理IG特征 (如果存在)
+                # 处理IG归因 (如果存在)
                 if 'attributes_last_token' in results and len(results['attributes_last_token']) > 0:
-                    print(f"处理IG特征分类器...")
-                    print(f"IG特征样本数: {len(results['attributes_last_token'])}")
-                    
-                    # 检查数据是否为空
-                    valid_samples = []
-                    valid_labels = []
-                    for i, attr in enumerate(results['attributes_last_token']):
-                        if isinstance(attr, np.ndarray) and attr.size > 0:
-                            valid_samples.append(attr)
-                            valid_labels.append(labels[i])
-                    
-                    if len(valid_samples) > 0:
-                        print(f"有效IG特征样本数: {len(valid_samples)}")
+                    print(f"处理IG归因分类器...")
+                    # 检查维度
+                    try:
+                        # 直接使用FFN分类器
+                        attrs_data = np.stack(results['attributes_last_token'])
+                        if len(attrs_data.shape) > 0 and attrs_data.shape[0] > 0:
+                            attribution_roc, attribution_acc = gen_classifier_roc(attrs_data, labels)
+                            classifier_results['attribution_roc'] = attribution_roc
+                            classifier_results['attribution_acc'] = attribution_acc
+                            print(f"IG归因 ROC: {attribution_roc:.4f}, 准确率: {attribution_acc:.4f}")
                         
+                        # 使用RNN分类器
                         X_train, X_test, y_train, y_test = train_test_split(
-                            valid_samples, 
-                            np.array(valid_labels).astype(int), 
+                            results['attributes_last_token'], 
+                            labels.astype(int), 
                             test_size=0.2, 
                             random_state=1234
                         )
@@ -198,77 +196,82 @@ def main():
                         roc = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
                         acc = (prediction_classes.numpy()==y_test).mean()
                         
-                        print(f"IG特征 ROC: {roc:.4f}, 准确率: {acc:.4f}")
+                        print(f"RNN归因 ROC: {roc:.4f}, 准确率: {acc:.4f}")
                         
-                        classifier_results['attributes_last_token_rnn_roc'] = roc
-                        classifier_results['attributes_last_token_rnn_acc'] = acc
-                    else:
-                        print("警告: 没有有效的IG特征样本")
+                        classifier_results['attribution_rnn_roc'] = roc
+                        classifier_results['attribution_rnn_acc'] = acc
+                    except Exception as e:
+                        print(f"处理IG归因时出错: {e}")
                 
                 # 处理最后一个token的softmax概率
                 if 'last_token_softmax' in results and len(results['last_token_softmax']) > 0:
                     print(f"处理softmax概率分类器...")
-                    # 检查数据
-                    if isinstance(results['last_token_softmax'][0], np.ndarray) and results['last_token_softmax'][0].size > 0:
+                    try:
                         last_token_softmax = np.stack(results['last_token_softmax'])
                         softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
                         classifier_results['last_token_softmax_roc'] = softmax_roc
                         classifier_results['last_token_softmax_acc'] = softmax_acc
                         print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
-                    else:
-                        print("警告: Softmax概率数据为空或无法处理")
+                    except Exception as e:
+                        print(f"处理softmax概率时出错: {e}")
                 
                 # 处理全连接层
                 if 'last_token_fully_connected' in results and len(results['last_token_fully_connected']) > 0:
                     print(f"处理全连接层分类器...")
-                    # 首先检查维度
-                    data_shape = np.array(results['last_token_fully_connected'][0]).shape
-                    print(f"全连接层数据形状: {data_shape}")
-                    
-                    if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
-                        print("警告: 全连接层数据为空，跳过")
-                    else:
-                        # 如果是单层数据，直接处理
-                        if len(data_shape) == 1:
-                            layer_data = np.stack(results['last_token_fully_connected'])
-                            layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
-                            classifier_results[f'last_token_fully_connected_roc'] = layer_roc
-                            classifier_results[f'last_token_fully_connected_acc'] = layer_acc
-                            print(f"全连接层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                    try:
+                        # 首先检查维度
+                        data_shape = np.array(results['last_token_fully_connected'][0]).shape
+                        print(f"全连接层数据形状: {data_shape}")
+                        
+                        if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
+                            print("警告: 全连接层数据为空，跳过")
                         else:
-                            # 逐层处理
-                            for layer in range(data_shape[0]):
-                                layer_data = np.stack([i[layer] for i in results['last_token_fully_connected']])
+                            # 如果是单层数据，直接处理
+                            if len(data_shape) == 1:
+                                layer_data = np.stack(results['last_token_fully_connected'])
                                 layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
-                                classifier_results[f'last_token_fully_connected_roc_{layer}'] = layer_roc
-                                classifier_results[f'last_token_fully_connected_acc_{layer}'] = layer_acc
-                                print(f"全连接层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                                classifier_results[f'last_token_fully_connected_roc'] = layer_roc
+                                classifier_results[f'last_token_fully_connected_acc'] = layer_acc
+                                print(f"全连接层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                            else:
+                                # 逐层处理
+                                for layer in range(data_shape[0]):
+                                    layer_data = np.stack([i[layer] for i in results['last_token_fully_connected']])
+                                    layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                                    classifier_results[f'last_token_fully_connected_roc_{layer}'] = layer_roc
+                                    classifier_results[f'last_token_fully_connected_acc_{layer}'] = layer_acc
+                                    print(f"全连接层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                    except Exception as e:
+                        print(f"处理全连接层时出错: {e}")
                 
                 # 处理注意力层
                 if 'last_token_attention' in results and len(results['last_token_attention']) > 0:
                     print(f"处理注意力层分类器...")
-                    # 首先检查维度
-                    data_shape = np.array(results['last_token_attention'][0]).shape
-                    print(f"注意力层数据形状: {data_shape}")
-                    
-                    if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
-                        print("警告: 注意力层数据为空，跳过")
-                    else:
-                        # 如果是单层数据，直接处理
-                        if len(data_shape) == 1:
-                            layer_data = np.stack(results['last_token_attention'])
-                            layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
-                            classifier_results[f'last_token_attention_roc'] = layer_roc
-                            classifier_results[f'last_token_attention_acc'] = layer_acc
-                            print(f"注意力层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                    try:
+                        # 首先检查维度
+                        data_shape = np.array(results['last_token_attention'][0]).shape
+                        print(f"注意力层数据形状: {data_shape}")
+                        
+                        if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
+                            print("警告: 注意力层数据为空，跳过")
                         else:
-                            # 逐层处理
-                            for layer in range(data_shape[0]):
-                                layer_data = np.stack([i[layer] for i in results['last_token_attention']])
+                            # 如果是单层数据，直接处理
+                            if len(data_shape) == 1:
+                                layer_data = np.stack(results['last_token_attention'])
                                 layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
-                                classifier_results[f'last_token_attention_roc_{layer}'] = layer_roc
-                                classifier_results[f'last_token_attention_acc_{layer}'] = layer_acc
-                                print(f"注意力层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                                classifier_results[f'last_token_attention_roc'] = layer_roc
+                                classifier_results[f'last_token_attention_acc'] = layer_acc
+                                print(f"注意力层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                            else:
+                                # 逐层处理
+                                for layer in range(data_shape[0]):
+                                    layer_data = np.stack([i[layer] for i in results['last_token_attention']])
+                                    layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                                    classifier_results[f'last_token_attention_roc_{layer}'] = layer_roc
+                                    classifier_results[f'last_token_attention_acc_{layer}'] = layer_acc
+                                    print(f"注意力层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                    except Exception as e:
+                        print(f"处理注意力层时出错: {e}")
                 
                 all_results[str(results_file)] = classifier_results.copy()
                 print(f"处理文件 {results_file} 完成")
