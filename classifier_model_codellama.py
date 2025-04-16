@@ -99,9 +99,10 @@ def main():
                         'code': [],
                         'label': [],
                         'last_token_pos': [],
+                        'last_token_softmax': [],
                         'last_token_fully_connected': [],
                         'last_token_attention': [],
-                        'last_token_softmax': []
+                        'attributes_last_token': []
                     }
                     
                     for item in results_data:
@@ -119,84 +120,103 @@ def main():
                 print(f"数据样本数: {len(results['label'])}")
                 labels = np.array(results['label'])
                 
-                # 处理属性归因 (如果存在)
-                if 'attributes_last_token' in results and results['attributes_last_token']:
-                    print(f"处理RNN归因分类器...")
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        results['attributes_last_token'], 
-                        labels.astype(int), 
-                        test_size=0.2, 
-                        random_state=1234
-                    )
+                # 处理IG特征 (如果存在)
+                if 'attributes_last_token' in results and len(results['attributes_last_token']) > 0:
+                    print(f"处理IG特征分类器...")
+                    print(f"IG特征样本数: {len(results['attributes_last_token'])}")
                     
-                    rnn_model = RNNHallucinationClassifier().to(device)
-                    optimizer = torch.optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+                    # 检查数据是否为空
+                    valid_samples = []
+                    valid_labels = []
+                    for i, attr in enumerate(results['attributes_last_token']):
+                        if isinstance(attr, np.ndarray) and attr.size > 0:
+                            valid_samples.append(attr)
+                            valid_labels.append(labels[i])
                     
-                    # 打印一些调试信息
-                    print(f"训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
-                    
-                    for step in range(1001):
-                        # 确保有足够的样本进行采样
-                        sample_size = min(batch_size, len(X_train))
-                        indices = random.sample(range(len(X_train)), sample_size)
+                    if len(valid_samples) > 0:
+                        print(f"有效IG特征样本数: {len(valid_samples)}")
                         
-                        # 批量处理以提高效率
-                        batch_x = [X_train[i] for i in indices]
-                        batch_y = [y_train[i] for i in indices]
+                        X_train, X_test, y_train, y_test = train_test_split(
+                            valid_samples, 
+                            np.array(valid_labels).astype(int), 
+                            test_size=0.2, 
+                            random_state=1234
+                        )
                         
-                        # 转换为张量并移动到设备
-                        y_sub = torch.tensor(batch_y).to(torch.long).to(device)
+                        rnn_model = RNNHallucinationClassifier().to(device)
+                        optimizer = torch.optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
                         
-                        # 单独处理每个属性序列并收集预测
-                        optimizer.zero_grad()
-                        batch_preds = []
-                        for i, x in enumerate(batch_x):
-                            x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
-                            pred = rnn_model(x_tensor)
-                            batch_preds.append(pred)
+                        # 打印一些调试信息
+                        print(f"训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
                         
-                        preds = torch.stack(batch_preds)
+                        for step in range(1001):
+                            # 确保有足够的样本进行采样
+                            sample_size = min(batch_size, len(X_train))
+                            indices = random.sample(range(len(X_train)), sample_size)
+                            
+                            # 批量处理以提高效率
+                            batch_x = [X_train[i] for i in indices]
+                            batch_y = [y_train[i] for i in indices]
+                            
+                            # 转换为张量并移动到设备
+                            y_sub = torch.tensor(batch_y).to(torch.long).to(device)
+                            
+                            # 单独处理每个属性序列并收集预测
+                            optimizer.zero_grad()
+                            batch_preds = []
+                            for i, x in enumerate(batch_x):
+                                x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
+                                pred = rnn_model(x_tensor)
+                                batch_preds.append(pred)
+                            
+                            preds = torch.stack(batch_preds)
+                            
+                            if step == 0:
+                                print(f"预测形状: {preds.shape}, 标签形状: {y_sub.shape}")
+                            
+                            loss = torch.nn.functional.cross_entropy(preds, y_sub)
+                            loss.backward()
+                            optimizer.step()
+                            
+                            if step % 100 == 0:
+                                print(f"步骤 {step}, 损失: {loss.item():.4f}")
                         
-                        if step == 0:
-                            print(f"预测形状: {preds.shape}, 标签形状: {y_sub.shape}")
+                        # 收集测试集预测
+                        print(f"评估测试集...")
+                        test_preds = []
+                        with torch.no_grad():
+                            for x in X_test:
+                                x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
+                                pred = rnn_model(x_tensor)
+                                test_preds.append(pred)
                         
-                        loss = torch.nn.functional.cross_entropy(preds, y_sub)
-                        loss.backward()
-                        optimizer.step()
+                        preds = torch.stack(test_preds)
+                        preds = torch.nn.functional.softmax(preds, dim=1)
+                        prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
                         
-                        if step % 100 == 0:
-                            print(f"步骤 {step}, 损失: {loss.item():.4f}")
-                    
-                    # 收集测试集预测
-                    print(f"评估测试集...")
-                    test_preds = []
-                    with torch.no_grad():
-                        for x in X_test:
-                            x_tensor = torch.tensor(x).view(-1, 1).to(torch.float).to(device)
-                            pred = rnn_model(x_tensor)
-                            test_preds.append(pred)
-                    
-                    preds = torch.stack(test_preds)
-                    preds = torch.nn.functional.softmax(preds, dim=1)
-                    prediction_classes = (preds[:,1]>0.5).type(torch.long).cpu()
-                    
-                    # 计算指标
-                    roc = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
-                    acc = (prediction_classes.numpy()==y_test).mean()
-                    
-                    print(f"RNN归因 ROC: {roc:.4f}, 准确率: {acc:.4f}")
-                    
-                    classifier_results['last_token_attribution_rnn_roc'] = roc
-                    classifier_results['last_token_attribution_rnn_acc'] = acc
+                        # 计算指标
+                        roc = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
+                        acc = (prediction_classes.numpy()==y_test).mean()
+                        
+                        print(f"IG特征 ROC: {roc:.4f}, 准确率: {acc:.4f}")
+                        
+                        classifier_results['attributes_last_token_rnn_roc'] = roc
+                        classifier_results['attributes_last_token_rnn_acc'] = acc
+                    else:
+                        print("警告: 没有有效的IG特征样本")
                 
                 # 处理最后一个token的softmax概率
-                if 'last_token_softmax' in results and results['last_token_softmax']:
+                if 'last_token_softmax' in results and len(results['last_token_softmax']) > 0:
                     print(f"处理softmax概率分类器...")
-                    last_token_softmax = np.stack(results['last_token_softmax'])
-                    softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
-                    classifier_results['last_token_softmax_roc'] = softmax_roc
-                    classifier_results['last_token_softmax_acc'] = softmax_acc
-                    print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
+                    # 检查数据
+                    if isinstance(results['last_token_softmax'][0], np.ndarray) and results['last_token_softmax'][0].size > 0:
+                        last_token_softmax = np.stack(results['last_token_softmax'])
+                        softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
+                        classifier_results['last_token_softmax_roc'] = softmax_roc
+                        classifier_results['last_token_softmax_acc'] = softmax_acc
+                        print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
+                    else:
+                        print("警告: Softmax概率数据为空或无法处理")
                 
                 # 处理全连接层
                 if 'last_token_fully_connected' in results and len(results['last_token_fully_connected']) > 0:

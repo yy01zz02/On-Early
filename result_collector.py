@@ -11,6 +11,7 @@ import random
 import json
 import pandas as pd
 from pathlib import Path
+from captum.attr import IntegratedGradients
 
 # 设置随机种子
 def set_seed(seed):
@@ -25,6 +26,66 @@ def set_seed(seed):
 # 设置设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
+
+# IG参数
+ig_steps = 64
+internal_batch_size = 4
+
+# 获取embedder
+def get_embedder(model):
+    """获取模型的词嵌入层"""
+    return model.model.embed_tokens
+
+# 模型前向传播函数，用于Integrated Gradients
+def model_forward(input_, model, extra_forward_args=None):
+    """模型前向传播函数，用于Integrated Gradients"""
+    extra_forward_args = {} if extra_forward_args is None else extra_forward_args
+    output = model(inputs_embeds=input_, **extra_forward_args)
+    return torch.nn.functional.softmax(output.logits[:, -1, :], dim=-1)
+
+# 归一化属性
+def normalize_attributes(attributes):
+    """归一化Integrated Gradients属性"""
+    attributes = attributes.squeeze(0)
+    norm = torch.norm(attributes, dim=1)
+    attributes = norm / torch.sum(norm)  # 将值归一化使其总和为1
+    return attributes
+
+# 计算Integrated Gradients属性
+def compute_ig_attributes(code, model, tokenizer, token_pos):
+    """计算Integrated Gradients属性"""
+    try:
+        # 获取embedder
+        embedder = get_embedder(model)
+        
+        # 对输入进行编码
+        input_ids = tokenizer(code, return_tensors='pt').to(device)['input_ids']
+        
+        # 确保token_pos在有效范围内
+        token_pos = min(token_pos, input_ids.shape[1] - 1)
+        
+        # 对目标位置的token进行归因分析
+        target_token_id = input_ids[0, token_pos].item()
+        
+        # 获取词嵌入
+        encoder_input_embeds = embedder(input_ids).detach()
+        
+        # 计算Integrated Gradients
+        forward_func = lambda x: model_forward(x, model)
+        ig = IntegratedGradients(forward_func=forward_func)
+        attributes = normalize_attributes(
+            ig.attribute(
+                encoder_input_embeds,
+                target=target_token_id,
+                n_steps=ig_steps,
+                internal_batch_size=internal_batch_size
+            )
+        ).detach().cpu().numpy()
+        
+        return attributes
+    except Exception as e:
+        print(f"计算IG属性时出错: {e}")
+        return np.array([])
 
 # 加载模型和分词器
 model_path = "/root/.cache/modelscope/hub/models/Qwen/Qwen2.5-Coder-7B"
@@ -123,6 +184,9 @@ def extract_features(code, label):
             features = attention_forward_handles['attention_output'][0, -1].cpu().numpy()
             last_token_attention.append(features)
     
+    # 计算Integrated Gradients属性
+    attributes_last_token = compute_ig_attributes(code, model, tokenizer, last_token_pos)
+    
     # 清理钩子存储，但保留钩子本身
     if 'last_hidden_state' in fully_connected_forward_handles:
         del fully_connected_forward_handles['last_hidden_state']
@@ -137,6 +201,7 @@ def extract_features(code, label):
         'last_token_softmax': softmax_probs,
         'last_token_fully_connected': np.array(last_token_fully_connected) if last_token_fully_connected else np.array([]),
         'last_token_attention': np.array(last_token_attention) if last_token_attention else np.array([]),
+        'attributes_last_token': attributes_last_token
     }
 
 # 主函数
