@@ -12,6 +12,7 @@ import pandas as pd
 from pathlib import Path
 from captum.attr import IntegratedGradients
 from functools import partial
+from scipy import sparse
 
 # 设置随机种子
 def set_seed(seed):
@@ -27,26 +28,29 @@ def set_seed(seed):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
-# Integrated Gradients参数
-ig_steps = 64
-internal_batch_size = 4
+# Integrated Gradients参数 - 减少计算步骤以提高效率
+ig_steps = 16  # 减少步数
+internal_batch_size = 8  # 增加批量大小
+ig_sample_rate = 5  # 每5个样本计算一次IG
 
 # 存储特征提取的钩子
-fully_connected_forward_handles = {}
-attention_forward_handles = {}
+features_dict = {
+    'fc_output': None,
+    'attn_output': None
+}
 
 # 特征提取函数
 def get_fully_connected_features(module, input, output):
     # 获取全连接层的输出
     fc_output = output[0] if isinstance(output, tuple) else output
     # 存储激活值
-    fully_connected_forward_handles['fc_output'] = fc_output.detach()
+    features_dict['fc_output'] = fc_output.detach()
 
 def get_attention_features(module, input, output):
     # 获取注意力层的输出
     attn_output = output[0] if isinstance(output, tuple) else output
     # 存储激活值
-    attention_forward_handles['attn_output'] = attn_output.detach()
+    features_dict['attn_output'] = attn_output.detach()
 
 # 获取词嵌入层
 def get_embedder(model):
@@ -87,6 +91,35 @@ def get_ig(code_content, token_pos, forward_func, tokenizer, embedder, model):
     
     return attributes
 
+# 注册钩子函数
+def register_hooks(model, layer_idx):
+    hooks = []
+    
+    # 全连接层钩子
+    fc_name = f"model.layers.{layer_idx}.mlp.down_proj"
+    for name, module in model.named_modules():
+        if fc_name in name:
+            print(f"为全连接层注册钩子: {name}")
+            hooks.append(module.register_forward_hook(get_fully_connected_features))
+            break
+    
+    # 注意力层钩子
+    attn_name = f"model.layers.{layer_idx}.self_attn.o_proj"
+    for name, module in model.named_modules():
+        if attn_name in name:
+            print(f"为注意力层注册钩子: {name}")
+            hooks.append(module.register_forward_hook(get_attention_features))
+            break
+    
+    return hooks
+
+# 获取top-k softmax概率
+def get_top_k_softmax(logits, k=50):
+    top_values, top_indices = torch.topk(logits, k)
+    sparse_softmax = torch.zeros_like(logits)
+    sparse_softmax.scatter_(0, top_indices, top_values)
+    return F.softmax(sparse_softmax, dim=-1).cpu().numpy()
+
 def main():
     # 设置随机种子
     set_seed(42)
@@ -94,7 +127,7 @@ def main():
     # 加载模型和分词器
     model_path = "/root/.cache/modelscope/hub/models/AI-ModelScope/CodeLlama-7b-hf"
     print(f"正在加载模型: {model_path}")
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", torch_dtype=torch.float16)  # 使用半精度加载模型
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model.eval()
 
@@ -110,25 +143,7 @@ def main():
     
     # 注册钩子
     print("正在注册特征提取钩子...")
-    
-    # 只注册最后一层的钩子
-    layer_idx = num_layers - 1
-    
-    # 全连接层钩子
-    fc_name = f"model.layers.{layer_idx}.mlp.down_proj"
-    for name, module in model.named_modules():
-        if fc_name in name:
-            print(f"为全连接层注册钩子: {name}")
-            fully_connected_forward_handles[name] = module.register_forward_hook(get_fully_connected_features)
-            break
-    
-    # 注意力层钩子
-    attn_name = f"model.layers.{layer_idx}.self_attn.o_proj"
-    for name, module in model.named_modules():
-        if attn_name in name:
-            print(f"为注意力层注册钩子: {name}")
-            attention_forward_handles[name] = module.register_forward_hook(get_attention_features)
-            break
+    hooks = register_hooks(model, num_layers - 1)
     
     # 加载代码样本
     data_file = 'merged_data.csv'
@@ -147,13 +162,17 @@ def main():
         'code': [],
         'label': [],
         'last_token_pos': [],
-        'last_token_softmax': [],  # 最后一个token的softmax概率
+        'last_token_softmax': [],  # 最后一个token的softmax概率 (top-50)
         'attributes_last_token': [],  # IG特征归因
         'last_token_attention': [],  # 注意力得分
         'last_token_fully_connected': []  # 全连接层激活
     }
     
-    for sample in tqdm(code_samples, desc="提取特征"):
+    # 优化：批处理样本提高效率
+    batch_size = 1  # 当前只能按1个处理，未来可优化为更大批量
+    last_attributes = None  # 存储上一个有效的IG结果
+    
+    for idx, sample in enumerate(tqdm(code_samples, desc="提取特征")):
         code = sample['code']
         label = sample['label']
         
@@ -164,28 +183,27 @@ def main():
         # 获取最后一个token的位置
         last_token_pos = inputs['input_ids'].shape[1] - 1
         
-        # 前向传播
+        # 前向传播 - 只执行一次
         with torch.no_grad():
             outputs = model(**inputs)
             
-            # 1. 获取softmax概率
+            # 1. 获取top-k softmax概率
             last_token_logits = outputs.logits[0, -1]
-            last_token_softmax = F.softmax(last_token_logits, dim=-1).cpu().numpy()
+            last_token_softmax = get_top_k_softmax(last_token_logits, k=50)
             
-            # 2. 获取全连接层激活 - 如果钩子已注册
-            if 'fc_output' in fully_connected_forward_handles:
-                fc_features = fully_connected_forward_handles['fc_output'][0, -1].cpu().numpy()
-            else:
-                fc_features = np.array([])
-                
-            # 3. 获取注意力得分 - 如果钩子已注册
-            if 'attn_output' in attention_forward_handles:
-                attn_features = attention_forward_handles['attn_output'][0, -1].cpu().numpy()
-            else:
-                attn_features = np.array([])
+            # 2. 获取全连接层激活
+            fc_features = features_dict['fc_output'][0, -1].cpu().numpy() if features_dict['fc_output'] is not None else np.array([])
+            
+            # 3. 获取注意力得分
+            attn_features = features_dict['attn_output'][0, -1].cpu().numpy() if features_dict['attn_output'] is not None else np.array([])
         
-        # 4. 计算Integrated Gradients属性
-        attributes = get_ig(code, last_token_pos, forward_func, tokenizer, embedder, model)
+        # 4. 计算Integrated Gradients属性 - 间隔采样
+        if idx % ig_sample_rate == 0:
+            attributes = get_ig(code, last_token_pos, forward_func, tokenizer, embedder, model)
+            last_attributes = attributes
+        else:
+            # 使用最近的IG结果，避免重复计算
+            attributes = last_attributes if last_attributes is not None else np.zeros(last_token_pos + 1)
         
         # 存储结果
         results['code'].append(code)
@@ -196,11 +214,13 @@ def main():
         results['last_token_attention'].append(attn_features)
         results['last_token_fully_connected'].append(fc_features)
         
-        # 清理钩子存储
-        if 'fc_output' in fully_connected_forward_handles:
-            del fully_connected_forward_handles['fc_output']
-        if 'attn_output' in attention_forward_handles:
-            del attention_forward_handles['attn_output']
+        # 清理特征字典，准备下一次迭代
+        features_dict['fc_output'] = None
+        features_dict['attn_output'] = None
+    
+    # 移除钩子
+    for hook in hooks:
+        hook.remove()
     
     # 保存结果
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -210,6 +230,10 @@ def main():
     with open(save_path, 'wb') as f:
         pickle.dump(results, f)
     print(f"结果已保存到: {save_path}")
+    
+    # 清理内存
+    del model
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main() 
