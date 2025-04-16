@@ -191,14 +191,14 @@ def main():
                     classifier_results['last_token_attribution_rnn_roc'] = roc
                     classifier_results['last_token_attribution_rnn_acc'] = acc
                 
-                # 处理最后一层的隐藏状态
-                if 'last_hidden_state' in results and results['last_hidden_state']:
-                    print(f"处理隐藏状态分类器...")
-                    last_hidden_states = np.stack(results['last_hidden_state'])
-                    hidden_roc, hidden_acc = gen_classifier_roc(last_hidden_states, labels)
-                    classifier_results['last_hidden_state_roc'] = hidden_roc
-                    classifier_results['last_hidden_state_acc'] = hidden_acc
-                    print(f"隐藏状态 ROC: {hidden_roc:.4f}, 准确率: {hidden_acc:.4f}")
+                # 处理最后一个token的softmax概率
+                if 'last_token_softmax' in results and results['last_token_softmax']:
+                    print(f"处理softmax概率分类器...")
+                    last_token_softmax = np.stack(results['last_token_softmax'])
+                    softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
+                    classifier_results['last_token_softmax_roc'] = softmax_roc
+                    classifier_results['last_token_softmax_acc'] = softmax_acc
+                    print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
                 
                 # 处理全连接层
                 if 'last_token_fully_connected' in results and len(results['last_token_fully_connected']) > 0:

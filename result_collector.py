@@ -105,8 +105,9 @@ def extract_features(code, label):
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
     
-    # 获取logits (只用于处理，不保存)
+    # 获取logits并计算softmax概率 (为了保存)
     logits = outputs.logits[0, -1].cpu().numpy()
+    softmax_probs = torch.nn.functional.softmax(outputs.logits[0, -1], dim=-1).cpu().numpy()
     
     # 获取最后一层的MLP特征
     last_token_fully_connected = []
@@ -122,9 +123,6 @@ def extract_features(code, label):
             features = attention_forward_handles['attention_output'][0, -1].cpu().numpy()
             last_token_attention.append(features)
     
-    # 获取最后一层的隐藏状态
-    last_hidden_state = outputs.hidden_states[-1][0, -1].cpu().numpy()
-    
     # 清理钩子存储，但保留钩子本身
     if 'last_hidden_state' in fully_connected_forward_handles:
         del fully_connected_forward_handles['last_hidden_state']
@@ -135,10 +133,10 @@ def extract_features(code, label):
         'code': code,
         'label': label,
         'last_token_pos': last_token_pos,
-        # 移除logits以减小存储大小
+        # 保存最后一个token的softmax概率，这是原始代码中使用的关键特征
+        'last_token_softmax': softmax_probs,
         'last_token_fully_connected': np.array(last_token_fully_connected) if last_token_fully_connected else np.array([]),
         'last_token_attention': np.array(last_token_attention) if last_token_attention else np.array([]),
-        'last_hidden_state': last_hidden_state
     }
 
 # 主函数
