@@ -1,10 +1,13 @@
 import pickle
 from pathlib import Path
 import numpy as np
+import scipy as sp
+
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 import random
+
 from tqdm import tqdm
 
 # 硬件设置
@@ -77,7 +80,7 @@ def gen_classifier_roc(inputs, labels):
         return roc_auc_score(y_test.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==y_test.cpu().numpy()).mean()
 
 def main():
-    results_pattern = "codellama_code_results_*.pickle"
+    results_pattern = "qwen_coder_results_*.pickle"
     inference_results = list(Path("./results/").rglob(results_pattern))
     print(f"查找结果文件 {results_pattern}，找到: {inference_results}")
     
@@ -89,7 +92,26 @@ def main():
                 classifier_results = {}
                 print(f"\n处理文件: {results_file}")
                 with open(results_file, "rb") as infile:
-                    results = pickle.load(infile)
+                    results_data = pickle.load(infile)
+                
+                # 检查结果格式 - 如果是列表，将其转换为字典格式
+                if isinstance(results_data, list):
+                    print("检测到列表格式，转换为字典格式...")
+                    results = {
+                        'code': [],
+                        'label': [],
+                        'last_token_pos': [],
+                        'last_token_fully_connected': [],
+                        'last_token_attention': [],
+                        'last_hidden_state': []
+                    }
+                    
+                    for item in results_data:
+                        for key in results.keys():
+                            if key in item:
+                                results[key].append(item[key])
+                else:
+                    results = results_data
                 
                 # 检查结果数据结构是否符合预期
                 if 'label' not in results or len(results['label']) == 0:
@@ -99,18 +121,9 @@ def main():
                 print(f"数据样本数: {len(results['label'])}")
                 labels = np.array(results['label'])
                 
-                # 处理Softmax概率
-                if 'last_token_softmax' in results and results['last_token_softmax']:
-                    print(f"处理Softmax概率分类器...")
-                    last_token_softmax = np.stack(results['last_token_softmax'])
-                    softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
-                    classifier_results['last_token_softmax_roc'] = softmax_roc
-                    classifier_results['last_token_softmax_acc'] = softmax_acc
-                    print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
-                
-                # 处理Integrated Gradients属性归因
+                # 处理属性归因 (如果存在)
                 if 'attributes_last_token' in results and results['attributes_last_token']:
-                    print(f"处理Integrated Gradients属性归因分类器...")
+                    print(f"处理RNN归因分类器...")
                     X_train, X_test, y_train, y_test = train_test_split(
                         results['attributes_last_token'], 
                         labels.astype(int), 
@@ -173,28 +186,71 @@ def main():
                     roc = roc_auc_score(y_test, preds[:,1].detach().cpu().numpy())
                     acc = (prediction_classes.numpy()==y_test).mean()
                     
-                    print(f"IG属性归因 ROC: {roc:.4f}, 准确率: {acc:.4f}")
+                    print(f"RNN归因 ROC: {roc:.4f}, 准确率: {acc:.4f}")
                     
-                    classifier_results['attributes_last_token_roc'] = roc
-                    classifier_results['attributes_last_token_acc'] = acc
+                    classifier_results['last_token_attribution_rnn_roc'] = roc
+                    classifier_results['last_token_attribution_rnn_acc'] = acc
+                
+                # 处理最后一层的隐藏状态
+                if 'last_hidden_state' in results and results['last_hidden_state']:
+                    print(f"处理隐藏状态分类器...")
+                    last_hidden_states = np.stack(results['last_hidden_state'])
+                    hidden_roc, hidden_acc = gen_classifier_roc(last_hidden_states, labels)
+                    classifier_results['last_hidden_state_roc'] = hidden_roc
+                    classifier_results['last_hidden_state_acc'] = hidden_acc
+                    print(f"隐藏状态 ROC: {hidden_roc:.4f}, 准确率: {hidden_acc:.4f}")
                 
                 # 处理全连接层
-                if 'last_token_fully_connected' in results and results['last_token_fully_connected']:
+                if 'last_token_fully_connected' in results and len(results['last_token_fully_connected']) > 0:
                     print(f"处理全连接层分类器...")
-                    fc_features = np.stack(results['last_token_fully_connected'])
-                    fc_roc, fc_acc = gen_classifier_roc(fc_features, labels)
-                    classifier_results['last_token_fully_connected_roc'] = fc_roc
-                    classifier_results['last_token_fully_connected_acc'] = fc_acc
-                    print(f"全连接层 ROC: {fc_roc:.4f}, 准确率: {fc_acc:.4f}")
+                    # 首先检查维度
+                    data_shape = np.array(results['last_token_fully_connected'][0]).shape
+                    print(f"全连接层数据形状: {data_shape}")
+                    
+                    if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
+                        print("警告: 全连接层数据为空，跳过")
+                    else:
+                        # 如果是单层数据，直接处理
+                        if len(data_shape) == 1:
+                            layer_data = np.stack(results['last_token_fully_connected'])
+                            layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                            classifier_results[f'last_token_fully_connected_roc'] = layer_roc
+                            classifier_results[f'last_token_fully_connected_acc'] = layer_acc
+                            print(f"全连接层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                        else:
+                            # 逐层处理
+                            for layer in range(data_shape[0]):
+                                layer_data = np.stack([i[layer] for i in results['last_token_fully_connected']])
+                                layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                                classifier_results[f'last_token_fully_connected_roc_{layer}'] = layer_roc
+                                classifier_results[f'last_token_fully_connected_acc_{layer}'] = layer_acc
+                                print(f"全连接层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
                 
                 # 处理注意力层
-                if 'last_token_attention' in results and results['last_token_attention']:
+                if 'last_token_attention' in results and len(results['last_token_attention']) > 0:
                     print(f"处理注意力层分类器...")
-                    attn_features = np.stack(results['last_token_attention'])
-                    attn_roc, attn_acc = gen_classifier_roc(attn_features, labels)
-                    classifier_results['last_token_attention_roc'] = attn_roc
-                    classifier_results['last_token_attention_acc'] = attn_acc
-                    print(f"注意力层 ROC: {attn_roc:.4f}, 准确率: {attn_acc:.4f}")
+                    # 首先检查维度
+                    data_shape = np.array(results['last_token_attention'][0]).shape
+                    print(f"注意力层数据形状: {data_shape}")
+                    
+                    if len(data_shape) == 0 or (len(data_shape) == 1 and data_shape[0] == 0):
+                        print("警告: 注意力层数据为空，跳过")
+                    else:
+                        # 如果是单层数据，直接处理
+                        if len(data_shape) == 1:
+                            layer_data = np.stack(results['last_token_attention'])
+                            layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                            classifier_results[f'last_token_attention_roc'] = layer_roc
+                            classifier_results[f'last_token_attention_acc'] = layer_acc
+                            print(f"注意力层 ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
+                        else:
+                            # 逐层处理
+                            for layer in range(data_shape[0]):
+                                layer_data = np.stack([i[layer] for i in results['last_token_attention']])
+                                layer_roc, layer_acc = gen_classifier_roc(layer_data, labels)
+                                classifier_results[f'last_token_attention_roc_{layer}'] = layer_roc
+                                classifier_results[f'last_token_attention_acc_{layer}'] = layer_acc
+                                print(f"注意力层 {layer} ROC: {layer_roc:.4f}, 准确率: {layer_acc:.4f}")
                 
                 all_results[str(results_file)] = classifier_results.copy()
                 print(f"处理文件 {results_file} 完成")
@@ -205,7 +261,7 @@ def main():
                 print(traceback.format_exc())  # 打印完整的堆栈跟踪
     
     # 保存结果
-    with open('./results/codellama_classifier_results.pickle', 'wb') as f:
+    with open('./results/qwen_classifier_results.pickle', 'wb') as f:
         pickle.dump(all_results, f)
     
     # 打印结果摘要
@@ -216,4 +272,4 @@ def main():
             print(f"  {metric}: {value:.4f}")
 
 if __name__ == "__main__":
-    main()
+    main() 

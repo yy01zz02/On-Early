@@ -92,10 +92,10 @@ def main():
     set_seed(42)
     
     # 加载模型和分词器
-    model_path = "/root/.cache/modelscope/hub/models/AI-ModelScope/CodeLlama-7b-hf"
+    model_path = "/root/.cache/modelscope/hub/models/Qwen/Qwen2.5-Coder-7B"
     print(f"正在加载模型: {model_path}")
     model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model.eval()
 
     print(f"模型类型: {type(model).__name__}")
@@ -204,7 +204,7 @@ def main():
     
     # 保存结果
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f'results/codellama_code_results_{timestamp}.pickle'
+    save_path = f'results/qwen_coder_results_{timestamp}.pickle'
     os.makedirs('results', exist_ok=True)
     
     with open(save_path, 'wb') as f:
@@ -212,4 +212,4 @@ def main():
     print(f"结果已保存到: {save_path}")
 
 if __name__ == "__main__":
-    main() 
+    main()
