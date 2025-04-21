@@ -3,7 +3,11 @@ import pickle
 import os
 import sys
 import torch
+import torch.serialization
 from pathlib import Path
+
+# 允许numpy.core.multiarray.scalar作为可信全局变量
+torch.serialization.add_safe_globals(['numpy.core.multiarray.scalar'])
 
 # 导入模型预测器
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -66,27 +70,31 @@ def predict_example(predictor, data, index=None):
     results = predict_single_sample(predictor, features_dict)
     
     # 打印详细结果
-    print("\n预测结果摘要:")
-    best_prob = 0
-    best_model = None
-    
-    for model_type, probs in results.items():
-        if model_type != 'ensemble':
-            if probs[1] > best_prob:
-                best_prob = probs[1]
-                best_model = model_type
-    
-    print(f"最可信的单一模型: {best_model} (幻觉概率: {best_prob:.4f})")
-    
-    if 'ensemble' in results:
-        ensemble_prob = results['ensemble'][1]
-        print(f"集成模型: 幻觉概率 = {ensemble_prob:.4f}")
+    if results:
+        print("\n预测结果摘要:")
+        best_prob = 0
+        best_model = None
         
-        # 最终判断
-        is_hallucination = ensemble_prob > 0.5
-        confidence = max(ensemble_prob, 1 - ensemble_prob)
+        for model_type, probs in results.items():
+            if model_type != 'ensemble':
+                if probs[1] > best_prob:
+                    best_prob = probs[1]
+                    best_model = model_type
         
-        print(f"\n最终判断: {'存在幻觉' if is_hallucination else '无幻觉'} (置信度: {confidence:.4f})")
+        if best_model:
+            print(f"最可信的单一模型: {best_model} (幻觉概率: {best_prob:.4f})")
+        
+        if 'ensemble' in results:
+            ensemble_prob = results['ensemble'][1]
+            print(f"集成模型: 幻觉概率 = {ensemble_prob:.4f}")
+            
+            # 最终判断
+            is_hallucination = ensemble_prob > 0.5
+            confidence = max(ensemble_prob, 1 - ensemble_prob)
+            
+            print(f"\n最终判断: {'存在幻觉' if is_hallucination else '无幻觉'} (置信度: {confidence:.4f})")
+    else:
+        print("\n未能获取有效的预测结果。")
     
     return results
 

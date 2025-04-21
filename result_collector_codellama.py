@@ -52,7 +52,7 @@ def get_attention_features(module, input, output):
     # 存储激活值
     features_dict['attn_output'] = attn_output.detach()
 
-# 获取词嵌入层
+# 获取词嵌入层 - 对于CodeLlama模型，嵌入层路径是model.embed_tokens
 def get_embedder(model):
     return model.model.embed_tokens
 
@@ -95,7 +95,7 @@ def get_ig(code_content, token_pos, forward_func, tokenizer, embedder, model):
 def register_hooks(model, layer_idx):
     hooks = []
     
-    # 全连接层钩子
+    # 全连接层钩子 - CodeLlama模型的MLP输出投影层路径
     fc_name = f"model.layers.{layer_idx}.mlp.down_proj"
     for name, module in model.named_modules():
         if fc_name in name:
@@ -103,7 +103,7 @@ def register_hooks(model, layer_idx):
             hooks.append(module.register_forward_hook(get_fully_connected_features))
             break
     
-    # 注意力层钩子
+    # 注意力层钩子 - CodeLlama模型的自注意力输出投影层路径
     attn_name = f"model.layers.{layer_idx}.self_attn.o_proj"
     for name, module in model.named_modules():
         if attn_name in name:
@@ -125,10 +125,20 @@ def main():
     set_seed(42)
     
     # 加载模型和分词器
-    model_path = "/root/.cache/modelscope/hub/models/AI-ModelScope/CodeLlama-7b-hf"
+    model_path = "codellama/CodeLlama-7b-hf"
     print(f"正在加载模型: {model_path}")
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", torch_dtype=torch.float16)  # 使用半精度加载模型
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True)
+    except Exception as e:
+        print(f"模型加载失败: {e}")
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", torch_dtype=torch.float16, trust_remote_code=False)
+    
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as e:
+        print(f"分词器加载失败: {e}")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
+    
     model.eval()
 
     print(f"模型类型: {type(model).__name__}")
@@ -199,8 +209,12 @@ def main():
         
         # 4. 计算Integrated Gradients属性 - 间隔采样
         if idx % ig_sample_rate == 0:
-            attributes = get_ig(code, last_token_pos, forward_func, tokenizer, embedder, model)
-            last_attributes = attributes
+            try:
+                attributes = get_ig(code, last_token_pos, forward_func, tokenizer, embedder, model)
+                last_attributes = attributes
+            except Exception as e:
+                print(f"计算IG时出错: {e}")
+                attributes = last_attributes if last_attributes is not None else np.zeros(last_token_pos + 1)
         else:
             # 使用最近的IG结果，避免重复计算
             attributes = last_attributes if last_attributes is not None else np.zeros(last_token_pos + 1)
