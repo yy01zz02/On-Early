@@ -6,6 +6,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 import random
 from tqdm import tqdm
+import os
+from datetime import datetime
 
 # 硬件设置
 gpu = "0"
@@ -52,7 +54,7 @@ class RNNHallucinationClassifier(torch.nn.Module):
             return self.linear(gru_out[:, -1, :]).squeeze(0)  # 移除batch维度
 
 # 生成分类器的ROC
-def gen_classifier_roc(inputs, labels):
+def gen_classifier_roc(inputs, labels, feature_name, save_model=True):
     X_train, X_test, y_train, y_test = train_test_split(inputs, labels.astype(int), test_size=0.2, random_state=123)
     classifier_model = FFHallucinationClassifier(X_train.shape[1]).to(device)
     X_train = torch.tensor(X_train).to(torch.float).to(device)
@@ -74,7 +76,28 @@ def gen_classifier_roc(inputs, labels):
     with torch.no_grad():
         pred = torch.nn.functional.softmax(classifier_model(X_test), dim=1)
         prediction_classes = (pred[:,1]>0.5).type(torch.long).cpu()
-        return roc_auc_score(y_test.cpu(), pred[:,1].cpu()), (prediction_classes.numpy()==y_test.cpu().numpy()).mean()
+        roc = roc_auc_score(y_test.cpu(), pred[:,1].cpu())
+        acc = (prediction_classes.numpy()==y_test.cpu().numpy()).mean()
+        
+        # 保存模型
+        if save_model:
+            if not os.path.exists('./models'):
+                os.makedirs('./models')
+            model_filename = f'./models/codellama_ff_{feature_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt'
+            
+            # 保存完整模型信息，便于后续加载使用
+            model_info = {
+                'model_state_dict': classifier_model.state_dict(),
+                'input_shape': X_train.shape[1],
+                'feature_name': feature_name,
+                'accuracy': acc,
+                'roc': roc,
+                'model_type': 'FFHallucinationClassifier'
+            }
+            torch.save(model_info, model_filename)
+            print(f"{feature_name} FF分类器已保存到: {model_filename}")
+        
+        return roc, acc
 
 def main():
     results_pattern = "codellama_code_results_*.pickle"
@@ -82,6 +105,7 @@ def main():
     print(f"查找结果文件 {results_pattern}，找到: {inference_results}")
     
     all_results = {}
+    best_models = {}  # 存储每个特征对应的最佳模型信息
     
     for idx, results_file in enumerate(tqdm(inference_results)):
         if str(results_file) not in all_results.keys():
@@ -103,7 +127,7 @@ def main():
                 if 'last_token_softmax' in results and results['last_token_softmax']:
                     print(f"处理Softmax概率分类器...")
                     last_token_softmax = np.stack(results['last_token_softmax'])
-                    softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels)
+                    softmax_roc, softmax_acc = gen_classifier_roc(last_token_softmax, labels, "last_token_softmax")
                     classifier_results['last_token_softmax_roc'] = softmax_roc
                     classifier_results['last_token_softmax_acc'] = softmax_acc
                     print(f"Softmax概率 ROC: {softmax_roc:.4f}, 准确率: {softmax_acc:.4f}")
@@ -177,12 +201,27 @@ def main():
                     
                     classifier_results['attributes_last_token_roc'] = roc
                     classifier_results['attributes_last_token_acc'] = acc
+                    
+                    # 保存RNN模型
+                    if not os.path.exists('./models'):
+                        os.makedirs('./models')
+                    
+                    model_filename = f'./models/codellama_rnn_attributes_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt'
+                    model_info = {
+                        'model_state_dict': rnn_model.state_dict(),
+                        'feature_name': 'attributes_last_token',
+                        'accuracy': acc,
+                        'roc': roc,
+                        'model_type': 'RNNHallucinationClassifier'
+                    }
+                    torch.save(model_info, model_filename)
+                    print(f"RNN属性归因分类器已保存到: {model_filename}")
                 
                 # 处理全连接层
                 if 'last_token_fully_connected' in results and results['last_token_fully_connected']:
                     print(f"处理全连接层分类器...")
                     fc_features = np.stack(results['last_token_fully_connected'])
-                    fc_roc, fc_acc = gen_classifier_roc(fc_features, labels)
+                    fc_roc, fc_acc = gen_classifier_roc(fc_features, labels, "last_token_fully_connected")
                     classifier_results['last_token_fully_connected_roc'] = fc_roc
                     classifier_results['last_token_fully_connected_acc'] = fc_acc
                     print(f"全连接层 ROC: {fc_roc:.4f}, 准确率: {fc_acc:.4f}")
@@ -191,7 +230,7 @@ def main():
                 if 'last_token_attention' in results and results['last_token_attention']:
                     print(f"处理注意力层分类器...")
                     attn_features = np.stack(results['last_token_attention'])
-                    attn_roc, attn_acc = gen_classifier_roc(attn_features, labels)
+                    attn_roc, attn_acc = gen_classifier_roc(attn_features, labels, "last_token_attention")
                     classifier_results['last_token_attention_roc'] = attn_roc
                     classifier_results['last_token_attention_acc'] = attn_acc
                     print(f"注意力层 ROC: {attn_roc:.4f}, 准确率: {attn_acc:.4f}")
@@ -204,7 +243,7 @@ def main():
                 print(f"处理文件 {results_file} 时出错: {err}")
                 print(traceback.format_exc())  # 打印完整的堆栈跟踪
     
-    # 保存结果
+    # 保存分类结果
     with open('./results/codellama_classifier_results.pickle', 'wb') as f:
         pickle.dump(all_results, f)
     
