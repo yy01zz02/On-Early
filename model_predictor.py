@@ -6,10 +6,6 @@ from pathlib import Path
 import argparse
 from sklearn.metrics import roc_auc_score, accuracy_score
 import pickle
-import torch.serialization
-
-# 允许numpy.core.multiarray.scalar作为可信全局变量
-torch.serialization.add_safe_globals(['numpy.core.multiarray.scalar'])
 
 # 定义模型类，与分类器训练文件中相同
 class FFHallucinationClassifier(torch.nn.Module):
@@ -46,199 +42,187 @@ class RNNHallucinationClassifier(torch.nn.Module):
             return self.linear(gru_out[:, -1, :]).squeeze(0)  # 移除batch维度
 
 class ModelPredictor:
-    """
-    预测器类，用于加载和运行所有预训练模型
-    """
     def __init__(self, models_dir='./models', device=None):
-        """
-        初始化预测器
-        
-        参数:
-            models_dir: 包含所有模型的目录
-            device: 计算设备 (例如 'cuda', 'cpu')
-        """
-        self.models_dir = Path(models_dir)
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # 加载所有可用模型
-        self.models = self.load_models()
-        
-        # 加载模型ROC信息
-        self.model_rocs = self.load_model_rocs()
-        
-        # 如果至少有一个模型加载成功，则初始化成功
-        self.is_ready = len(self.models) > 0
-        if not self.is_ready:
-            print("警告: 没有成功加载任何模型，预测可能不可用。")
-        else:
-            print(f"成功加载了 {len(self.models)} 个模型。")
+        self.models_dir = models_dir
+        self.device = device if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.models = {
+            'softmax': None,
+            'attributes': None, 
+            'fully_connected': None,
+            'attention': None
+        }
+        self.load_models()
     
-    def safe_load_model(self, path):
-        """
-        安全加载模型，兼容PyTorch不同版本
-        """
-        # 首先尝试使用weights_only=False加载
-        try:
-            return torch.load(path, map_location=self.device)
-        except TypeError as e:
-            # 如果是weights_only相关的错误，尝试不使用该参数
-            if 'weights_only' in str(e):
-                # torch低版本没有weights_only参数
-                print(f"尝试兼容性模型加载: {path}")
-                return torch.load(path, map_location=self.device)
-            else:
-                # 其他类型错误直接抛出
-                raise
-        except Exception as e:
-            print(f"加载模型 {path} 时出错: {str(e)}")
+    def find_best_model(self, feature_type):
+        """查找特定特征类型的最佳模型文件"""
+        if feature_type == 'attributes':
+            pattern = os.path.join(self.models_dir, f"codellama_rnn_{feature_type}*.pt")
+        else:
+            pattern = os.path.join(self.models_dir, f"codellama_ff_last_token_{feature_type}*.pt")
+        
+        model_files = glob.glob(pattern)
+        if not model_files:
             return None
+        
+        # 按创建时间排序，获取最新的模型
+        latest_model = max(model_files, key=os.path.getctime)
+        return latest_model
     
     def load_models(self):
-        """
-        加载所有可用模型
-        """
-        models = {}
-        
-        # 模型类型和对应的文件名
-        model_types = {
-            'softmax': 'softmax_model.pt',
-            'attributes': 'attributes_model.pt',
-            'fully_connected': 'fully_connected_model.pt',
-            'attention': 'attention_model.pt',
-        }
-        
-        # 检查models目录是否存在
-        if not self.models_dir.exists():
-            print(f"警告: 模型目录 {self.models_dir} 不存在")
-            return models
-        
-        # 尝试加载每种类型的模型
-        for model_type, filename in model_types.items():
-            model_path = self.models_dir / filename
-            if model_path.exists():
-                try:
-                    print(f"加载模型: {model_path}...")
-                    model = self.safe_load_model(model_path)
-                    if model is not None:
-                        model.eval()  # 设置为评估模式
-                        models[model_type] = model
-                        print(f"成功加载模型: {model_type}")
-                    else:
-                        print(f"警告: 无法加载模型 {model_type}")
-                except Exception as e:
-                    print(f"加载模型 {model_type} 时出错: {str(e)}")
-            else:
-                print(f"模型文件不存在: {model_path}")
-        
-        return models
-    
-    def load_model_rocs(self):
-        """
-        加载模型ROC信息 (用于集成预测)
-        """
-        roc_file = self.models_dir / 'model_rocs.pickle'
-        if roc_file.exists():
+        """加载所有模型"""
+        # 加载softmax模型
+        softmax_model_file = self.find_best_model('softmax')
+        if softmax_model_file:
+            print(f"加载Softmax模型: {softmax_model_file}")
             try:
-                with open(roc_file, 'rb') as f:
-                    return pickle.load(f)
+                # 在PyTorch 2.6中，将weights_only参数设置为False以兼容旧模型
+                model_info = torch.load(softmax_model_file, map_location=self.device, weights_only=False)
+                model = FFHallucinationClassifier(model_info['input_shape']).to(self.device)
+                model.load_state_dict(model_info['model_state_dict'])
+                model.eval()
+                self.models['softmax'] = {
+                    'model': model,
+                    'info': model_info
+                }
             except Exception as e:
-                print(f"加载ROC数据时出错: {str(e)}")
-                return {}
-        else:
-            print(f"ROC数据文件不存在: {roc_file}")
-            return {}
+                print(f"加载Softmax模型失败: {e}")
+        
+        # 加载attributes模型
+        attributes_model_file = self.find_best_model('attributes')
+        if attributes_model_file:
+            print(f"加载IG属性归因模型: {attributes_model_file}")
+            try:
+                model_info = torch.load(attributes_model_file, map_location=self.device, weights_only=False)
+                model = RNNHallucinationClassifier().to(self.device)
+                model.load_state_dict(model_info['model_state_dict'])
+                model.eval()
+                self.models['attributes'] = {
+                    'model': model,
+                    'info': model_info
+                }
+            except Exception as e:
+                print(f"加载IG属性归因模型失败: {e}")
+        
+        # 加载fully_connected模型
+        fc_model_file = self.find_best_model('fully_connected')
+        if fc_model_file:
+            print(f"加载全连接层模型: {fc_model_file}")
+            try:
+                model_info = torch.load(fc_model_file, map_location=self.device, weights_only=False)
+                model = FFHallucinationClassifier(model_info['input_shape']).to(self.device)
+                model.load_state_dict(model_info['model_state_dict'])
+                model.eval()
+                self.models['fully_connected'] = {
+                    'model': model,
+                    'info': model_info
+                }
+            except Exception as e:
+                print(f"加载全连接层模型失败: {e}")
+        
+        # 加载attention模型
+        attn_model_file = self.find_best_model('attention')
+        if attn_model_file:
+            print(f"加载注意力层模型: {attn_model_file}")
+            try:
+                model_info = torch.load(attn_model_file, map_location=self.device, weights_only=False)
+                model = FFHallucinationClassifier(model_info['input_shape']).to(self.device)
+                model.load_state_dict(model_info['model_state_dict'])
+                model.eval()
+                self.models['attention'] = {
+                    'model': model,
+                    'info': model_info
+                }
+            except Exception as e:
+                print(f"加载注意力层模型失败: {e}")
     
-    def predict(self, features_dict):
-        """
-        使用所有可用模型进行预测
+    def predict_softmax(self, feature):
+        """使用Softmax概率特征预测"""
+        if self.models['softmax'] is None:
+            raise ValueError("Softmax模型未加载")
         
-        参数:
-            features_dict: 包含不同特征的字典，键为特征类型，值为特征向量
-                           可能的键: 'softmax', 'attributes', 'fully_connected', 'attention'
+        model = self.models['softmax']['model']
+        feature_tensor = torch.tensor(feature, dtype=torch.float).to(self.device)
         
-        返回:
-            predictions: 包含各个模型预测结果的字典，键为模型类型，值为预测概率 [class_0_prob, class_1_prob]
-        """
-        if not self.is_ready:
-            print("预测器未准备就绪。")
-            return None
+        with torch.no_grad():
+            logits = model(feature_tensor.unsqueeze(0))
+            probs = torch.nn.functional.softmax(logits, dim=1)
         
-        predictions = {}
-        
-        # 使用每个可用模型进行预测
-        for model_type, model in self.models.items():
-            # 检查是否有该模型对应的特征
-            if model_type in features_dict and features_dict[model_type] is not None:
-                feature = features_dict[model_type]
-                
-                # 将特征转换为张量并移动到正确的设备
-                if isinstance(feature, np.ndarray):
-                    feature_tensor = torch.FloatTensor(feature).to(self.device)
-                else:
-                    feature_tensor = feature.to(self.device)
-                
-                # 添加批次维度（如果需要）
-                if len(feature_tensor.shape) == 1:
-                    feature_tensor = feature_tensor.unsqueeze(0)
-                
-                # 进行预测
-                with torch.no_grad():
-                    output = model(feature_tensor)
-                    probabilities = torch.softmax(output, dim=1)[0].cpu().numpy()
-                    predictions[model_type] = probabilities
-        
-        # 如果有多个模型预测结果，添加集成预测
-        if len(predictions) > 1:
-            ensemble_prediction = self.ensemble_predictions(predictions)
-            if ensemble_prediction is not None:
-                predictions['ensemble'] = ensemble_prediction
-        
-        return predictions
+        return probs[0].cpu().numpy()
     
-    def ensemble_predictions(self, predictions):
-        """
-        基于各个模型的ROC性能，集成多个模型的预测结果
+    def predict_attributes(self, feature):
+        """使用IG属性归因特征预测"""
+        if self.models['attributes'] is None:
+            raise ValueError("IG属性归因模型未加载")
         
-        参数:
-            predictions: 包含各个模型预测结果的字典
+        model = self.models['attributes']['model']
+        feature_tensor = torch.tensor(feature, dtype=torch.float).view(-1, 1).to(self.device)
         
-        返回:
-            ensemble_probs: 集成后的预测概率 [class_0_prob, class_1_prob]
-        """
-        # 如果没有ROC数据，使用简单平均
-        if not self.model_rocs:
-            probs = np.array([pred for pred in predictions.values() if pred is not None])
-            return np.mean(probs, axis=0)
+        with torch.no_grad():
+            logits = model(feature_tensor)
+            probs = torch.nn.functional.softmax(logits, dim=0 if len(logits.shape) == 1 else 1)
         
-        # 基于ROC权重进行集成
-        weighted_probs = []
+        return probs.cpu().numpy() if len(probs.shape) == 1 else probs[0].cpu().numpy()
+    
+    def predict_fully_connected(self, feature):
+        """使用全连接层特征预测"""
+        if self.models['fully_connected'] is None:
+            raise ValueError("全连接层模型未加载")
+        
+        model = self.models['fully_connected']['model']
+        feature_tensor = torch.tensor(feature, dtype=torch.float).to(self.device)
+        
+        with torch.no_grad():
+            logits = model(feature_tensor.unsqueeze(0))
+            probs = torch.nn.functional.softmax(logits, dim=1)
+        
+        return probs[0].cpu().numpy()
+    
+    def predict_attention(self, feature):
+        """使用注意力层特征预测"""
+        if self.models['attention'] is None:
+            raise ValueError("注意力层模型未加载")
+        
+        model = self.models['attention']['model']
+        feature_tensor = torch.tensor(feature, dtype=torch.float).to(self.device)
+        
+        with torch.no_grad():
+            logits = model(feature_tensor.unsqueeze(0))
+            probs = torch.nn.functional.softmax(logits, dim=1)
+        
+        return probs[0].cpu().numpy()
+    
+    def ensemble_predict(self, features_dict):
+        """结合所有特征进行集成预测"""
+        probs = []
         weights = []
         
-        for model_type, probs in predictions.items():
-            if model_type in self.model_rocs:
-                roc = self.model_rocs.get(model_type, 0.5)  # 默认ROC为0.5
-                # 只有当ROC比随机猜测好时才使用该模型
-                if roc > 0.55:
-                    weighted_probs.append(probs * (roc - 0.5))
-                    weights.append(roc - 0.5)
+        # 使用各个模型的ROC作为权重
+        if 'softmax' in features_dict and self.models['softmax']:
+            probs.append(self.predict_softmax(features_dict['softmax']))
+            weights.append(self.models['softmax']['info']['roc'])
         
-        # 如果没有足够好的模型，返回None
-        if not weighted_probs:
-            # 退化为简单平均
-            probs = np.array([pred for pred in predictions.values() if pred is not None])
-            return np.mean(probs, axis=0)
+        if 'attributes' in features_dict and self.models['attributes']:
+            probs.append(self.predict_attributes(features_dict['attributes']))
+            weights.append(self.models['attributes']['info']['roc'])
         
-        # 计算加权平均
-        weighted_sum = np.sum(weighted_probs, axis=0)
-        weight_sum = np.sum(weights)
+        if 'fully_connected' in features_dict and self.models['fully_connected']:
+            probs.append(self.predict_fully_connected(features_dict['fully_connected']))
+            weights.append(self.models['fully_connected']['info']['roc'])
         
-        # 归一化
-        if weight_sum > 0:
-            return weighted_sum / weight_sum
-        else:
-            # 退化为简单平均
-            probs = np.array([pred for pred in predictions.values() if pred is not None])
-            return np.mean(probs, axis=0)
+        if 'attention' in features_dict and self.models['attention']:
+            probs.append(self.predict_attention(features_dict['attention']))
+            weights.append(self.models['attention']['info']['roc'])
+        
+        if not probs:
+            raise ValueError("没有可用的模型进行预测")
+        
+        # 加权平均
+        weights = np.array(weights) / sum(weights)
+        weighted_probs = np.zeros_like(probs[0])
+        for i, p in enumerate(probs):
+            weighted_probs += p * weights[i]
+        
+        return weighted_probs
 
 def test_models(predictor, test_file):
     """测试模型在测试数据上的表现"""
@@ -269,17 +253,13 @@ def test_models(predictor, test_file):
     if 'attributes_last_token' in test_data and predictor.models['attributes']:
         print("测试IG属性归因模型...")
         predictions = []
-        valid_indices = []
-        for i, feature in enumerate(test_data['attributes_last_token']):
+        for feature in test_data['attributes_last_token']:
             if len(feature) > 0:  # 确保特征不为空
-                try:
-                    pred = predictor.predict_attributes(feature)
-                    predictions.append(pred[1])  # 取正类概率
-                    valid_indices.append(i)
-                except Exception as e:
-                    print(f"样本 {i} 预测失败: {e}")
+                pred = predictor.predict_attributes(feature)
+                predictions.append(pred[1])  # 取正类概率
         
         if predictions:
+            valid_indices = [i for i, feat in enumerate(test_data['attributes_last_token']) if len(feat) > 0]
             valid_labels = labels[valid_indices]
             auc = roc_auc_score(valid_labels, predictions)
             predictions_binary = np.array(predictions) > 0.5
@@ -358,40 +338,34 @@ def test_models(predictor, test_file):
     return results
 
 def predict_single_sample(predictor, features_dict):
-    """
-    使用给定的预测器对单个样本进行预测
+    """预测单个样本"""
+    results = {}
     
-    参数:
-        predictor: ModelPredictor实例
-        features_dict: 特征字典
+    # 单独的模型预测
+    if 'softmax' in features_dict and predictor.models['softmax']:
+        results['softmax'] = predictor.predict_softmax(features_dict['softmax'])
+        print(f"Softmax模型预测 - 负类: {results['softmax'][0]:.4f}, 正类: {results['softmax'][1]:.4f}")
     
-    返回:
-        predictions: 预测结果字典
-    """
-    if not predictor.is_ready:
-        print("预测器未准备就绪，无法进行预测。")
-        return None
+    if 'attributes' in features_dict and predictor.models['attributes']:
+        results['attributes'] = predictor.predict_attributes(features_dict['attributes'])
+        print(f"IG属性归因模型预测 - 负类: {results['attributes'][0]:.4f}, 正类: {results['attributes'][1]:.4f}")
     
-    # 验证特征
-    valid_features = False
-    for feature_type in ['softmax', 'attributes', 'fully_connected', 'attention']:
-        if feature_type in features_dict and features_dict[feature_type] is not None:
-            valid_features = True
-            break
+    if 'fully_connected' in features_dict and predictor.models['fully_connected']:
+        results['fully_connected'] = predictor.predict_fully_connected(features_dict['fully_connected'])
+        print(f"全连接层模型预测 - 负类: {results['fully_connected'][0]:.4f}, 正类: {results['fully_connected'][1]:.4f}")
     
-    if not valid_features:
-        print("错误: 没有有效的特征可用于预测")
-        return None
+    if 'attention' in features_dict and predictor.models['attention']:
+        results['attention'] = predictor.predict_attention(features_dict['attention'])
+        print(f"注意力层模型预测 - 负类: {results['attention'][0]:.4f}, 正类: {results['attention'][1]:.4f}")
     
-    # 进行预测
+    # 集成预测
     try:
-        predictions = predictor.predict(features_dict)
-        return predictions
+        results['ensemble'] = predictor.ensemble_predict(features_dict)
+        print(f"集成模型预测 - 负类: {results['ensemble'][0]:.4f}, 正类: {results['ensemble'][1]:.4f}")
     except Exception as e:
-        print(f"预测过程中出错: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
+        print(f"集成预测失败: {e}")
+    
+    return results
 
 def main():
     parser = argparse.ArgumentParser(description='运行CodeLlama幻觉检测模型预测')
@@ -419,8 +393,7 @@ def main():
         print("\n可用模型:")
         for feature_type, model_info in predictor.models.items():
             if model_info:
-                roc = predictor.model_rocs.get(feature_type, 'N/A')
-                print(f"- {feature_type}: 加载成功 (ROC: {roc})")
+                print(f"- {feature_type}: 加载成功 (ROC: {model_info['info']['roc']:.4f})")
             else:
                 print(f"- {feature_type}: 未加载")
 

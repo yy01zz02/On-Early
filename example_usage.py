@@ -3,11 +3,7 @@ import pickle
 import os
 import sys
 import torch
-import torch.serialization
 from pathlib import Path
-
-# 允许numpy.core.multiarray.scalar作为可信全局变量
-torch.serialization.add_safe_globals(['numpy.core.multiarray.scalar'])
 
 # 导入模型预测器
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -16,25 +12,29 @@ from model_predictor import ModelPredictor, predict_single_sample
 def load_example_data(pickle_file):
     """加载示例数据"""
     print(f"从 {pickle_file} 加载示例数据...")
-    with open(pickle_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    # 打印数据基本信息
-    print(f"数据包含 {len(data['label'])} 个样本")
-    print(f"标签分布: 正例={sum(data['label'])}, 负例={len(data['label']) - sum(data['label'])}")
-    
-    # 验证数据结构
-    expected_keys = ['code', 'label', 'last_token_pos', 
-                     'last_token_softmax', 'attributes_last_token',
-                     'last_token_attention', 'last_token_fully_connected']
-    
-    for key in expected_keys:
-        if key in data:
-            print(f"找到特征: {key} - 样本数: {len(data[key])}")
-        else:
-            print(f"警告: 未找到特征 {key}")
-    
-    return data
+    try:
+        with open(pickle_file, 'rb') as f:
+            data = pickle.load(f)
+        
+        # 打印数据基本信息
+        print(f"数据包含 {len(data['label'])} 个样本")
+        print(f"标签分布: 正例={sum(data['label'])}, 负例={len(data['label']) - sum(data['label'])}")
+        
+        # 验证数据结构
+        expected_keys = ['code', 'label', 'last_token_pos', 
+                        'last_token_softmax', 'attributes_last_token',
+                        'last_token_attention', 'last_token_fully_connected']
+        
+        for key in expected_keys:
+            if key in data:
+                print(f"找到特征: {key} - 样本数: {len(data[key])}")
+            else:
+                print(f"警告: 未找到特征 {key}")
+        
+        return data
+    except Exception as e:
+        print(f"加载数据出错: {e}")
+        return None
 
 def predict_example(predictor, data, index=None):
     """预测一个示例"""
@@ -70,31 +70,27 @@ def predict_example(predictor, data, index=None):
     results = predict_single_sample(predictor, features_dict)
     
     # 打印详细结果
-    if results:
-        print("\n预测结果摘要:")
-        best_prob = 0
-        best_model = None
+    print("\n预测结果摘要:")
+    best_prob = 0
+    best_model = None
+    
+    for model_type, probs in results.items():
+        if model_type != 'ensemble':
+            if probs[1] > best_prob:
+                best_prob = probs[1]
+                best_model = model_type
+    
+    print(f"最可信的单一模型: {best_model} (幻觉概率: {best_prob:.4f})")
+    
+    if 'ensemble' in results:
+        ensemble_prob = results['ensemble'][1]
+        print(f"集成模型: 幻觉概率 = {ensemble_prob:.4f}")
         
-        for model_type, probs in results.items():
-            if model_type != 'ensemble':
-                if probs[1] > best_prob:
-                    best_prob = probs[1]
-                    best_model = model_type
+        # 最终判断
+        is_hallucination = ensemble_prob > 0.5
+        confidence = max(ensemble_prob, 1 - ensemble_prob)
         
-        if best_model:
-            print(f"最可信的单一模型: {best_model} (幻觉概率: {best_prob:.4f})")
-        
-        if 'ensemble' in results:
-            ensemble_prob = results['ensemble'][1]
-            print(f"集成模型: 幻觉概率 = {ensemble_prob:.4f}")
-            
-            # 最终判断
-            is_hallucination = ensemble_prob > 0.5
-            confidence = max(ensemble_prob, 1 - ensemble_prob)
-            
-            print(f"\n最终判断: {'存在幻觉' if is_hallucination else '无幻觉'} (置信度: {confidence:.4f})")
-    else:
-        print("\n未能获取有效的预测结果。")
+        print(f"\n最终判断: {'存在幻觉' if is_hallucination else '无幻觉'} (置信度: {confidence:.4f})")
     
     return results
 
@@ -117,6 +113,9 @@ def main():
     
     # 加载数据
     data = load_example_data(args.pickle_file)
+    if data is None:
+        print("无法加载数据，程序退出")
+        return
     
     # 创建预测器
     predictor = ModelPredictor(models_dir=args.models_dir, device=device)
