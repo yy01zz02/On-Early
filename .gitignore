@@ -2,3 +2,4 @@
 .idea/
 *.csv
 
+results/codellama_classifier_results.pickle
